@@ -1,0 +1,15 @@
+[general]
+name=Лавина — сценарии и риск
+description=Сценарное движение лавин по ЦМР, интенсивность воздействия и ожидаемый годовой ущерб.
+version=0.1.1
+qgisMinimumVersion=3.40
+qgisMaximumVersion=4.99
+author=Avalanche Scenario contributors
+email=
+about=Загрузка реального рельефа Copernicus по выделенному участку без ключа API. Исследовательский плагин по мотивам обзора моделей в диссертации А. С. Соловьева (2014). Упрощенные независимые трассеры с трением Фёлльми; не воспроизводит авторскую SPH-модель. Расчет риска по заданным частоте и уязвимости.
+category=Analysis
+icon=icon.svg
+experimental=True
+deprecated=False
+hasProcessingProvider=yes
+tags=avalanche,snow,risk,DEM,лавины,риск

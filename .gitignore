@@ -1,0 +1,54 @@
+# FastAPI / Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+/webapp/.deps/
+
+# Tests, type checking and coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# React / Vite
+node_modules/
+/webapp/frontend/dist/
+.vite/
+*.tsbuildinfo
+test-results/
+playwright-report/
+blob-report/
+
+# Package-manager caches
+.npm-cache/
+.pip-cache/
+.pnpm-store/
+
+# Uploaded data, calculation results and generated releases
+/webapp/data/
+/dist/
+/tmp/
+/webapp/preview*.png
+
+# Local environment settings; commit templates, not local values
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+
+# Logs, temporary files and OS metadata
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

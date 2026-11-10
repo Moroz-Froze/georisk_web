@@ -1,0 +1,11 @@
+export type Hazard = 'avalanche' | 'landslide' | 'wildfire';
+export type Bbox = [number,number,number,number];
+export type Field = {key:string;label:string;unit:string;default:number|string;type:string;options:Record<string,string>|null};
+export type Model = {id:Hazard;title:string;subtitle:string;method:string;note:string;buffer:number;fields:Field[]};
+export type Layer = {id:string;title:string;url:string;bounds:[[number,number],[number,number]];legend:{color:string;label:string}[]};
+export type Result = {status:string;summary:Record<string,number|boolean|null>;screening:Record<string,number|boolean>|null;
+  railway:Record<string,number|string|null>|null;warnings:string[];sources:{title:string;url:string}[];
+  data:Record<string,number|string>|null;layers:Layer[];files:{id:string;name:string;title:string;url:string}[];report_url:string;archive_url:string;
+  provenance?:{scenario_date:string|null;satellite:{date:string;clear_coverage:number}|null}};
+export type SavedRequest = {parameters:Record<string,number|string>;buffer:number|null;resolution:number;scenario_date:string;satellite:boolean;ignitions:[number,number][];[key:string]:unknown};
+export type Job = {id:string;hazard:Hazard;bbox:Bbox;state:string;progress:number;message:string;created_at:string;result?:Result;request?:SavedRequest};

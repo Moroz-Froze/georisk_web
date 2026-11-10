@@ -1,0 +1,13 @@
+services:
+  georisk:
+    build:
+      context: .
+      dockerfile: webapp/Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - georisk-data:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+volumes:
+  georisk-data:
