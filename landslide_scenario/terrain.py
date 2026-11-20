@@ -36,7 +36,7 @@ def network_options():
     options = {'GDAL_HTTP_TIMEOUT': '30', 'GDAL_HTTP_CONNECTTIMEOUT': '10',
                'GDAL_HTTP_MAX_RETRY': '2', 'GDAL_HTTP_RETRY_DELAY': '1',
                'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR',
-               'CPL_VSIL_CURL_ALLOWED_EXTENSIONS': '.tif,.vrt'}
+               'CPL_VSIL_CURL_ALLOWED_EXTENSIONS': '.tif'}
     previous = {k: gdal.GetThreadLocalConfigOption(k) for k in options}
     try:
         for k, v in options.items():
@@ -83,7 +83,7 @@ def prepare_terrain(area_wkt, area_crs, directory, local_dem='', buffer_m=3000,
         raise ValueError('Слишком большая сетка (>2 млн ячеек). Уменьшите участок или буфер.')
     sources, datasets = [], []
     if local_dem:
-        source = gdal.Open(local_dem)
+        source = gdal.OpenEx(local_dem, allowed_drivers=['GTiff'])
         if source is None or not source.GetProjection():
             raise ValueError('ЦМР не читается или у неё не задана система координат.')
         if source.RasterCount != 1:
@@ -126,7 +126,7 @@ def prepare_terrain(area_wkt, area_crs, directory, local_dem='', buffer_m=3000,
                         raise InterruptedError('Расчёт отменён.')
                     if notify:
                         notify(5, f'Открытие плитки рельефа {i+1}/{len(sources)}…')
-                    datasets.append(gdal.Open(path))
+                    datasets.append(gdal.OpenEx(path, allowed_drivers=['GTiff']))
             mosaic = gdal.BuildVRT('', datasets)
             ds = gdal.Warp(destination, mosaic, dstSRS=utm,
                            outputBounds=(xmin, ymin, xmax, ymax),

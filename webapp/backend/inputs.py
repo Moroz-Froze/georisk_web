@@ -1,14 +1,23 @@
 import json
 from osgeo import ogr
 from .storage import asset_path
+from .geojson import load_geojson
+
+
+def validate_assets(request, root):
+    """Check ownership before queueing; native parsing happens in child processes."""
+    for key, suffixes in {'dem_id': {'.tif','.tiff'}, 'weather_id':{'.csv'},
+                          'rail_id':{'.geojson'}, 'soil_id':{'.geojson'},
+                          'fuel_id':{'.geojson'}, 'release_id':{'.geojson'}}.items():
+        if request.get(key):
+            asset_path(root, request[key], suffixes)
 
 
 def features(root, asset_id, allowed, required=()):
     if not asset_id:
         return []
     path = asset_path(root, asset_id, {'.geojson'})
-    payload = json.loads(path.read_text(encoding='utf-8-sig'))
-    items = payload.get('features', []) if payload.get('type') == 'FeatureCollection' else [payload]
+    items = load_geojson(path)
     if not 0 < len(items) <= 10000:
         raise ValueError('GeoJSON должен содержать от 1 до 10 000 объектов.')
     records = []

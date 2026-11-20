@@ -4,7 +4,7 @@ from datetime import date,datetime,time,timedelta,timezone
 import json
 from pathlib import Path
 from urllib.parse import urlencode,urlparse
-from urllib.request import Request,urlopen
+from urllib.request import Request,HTTPRedirectHandler,build_opener
 from zoneinfo import ZoneInfo
 import numpy as np
 from osgeo import gdal
@@ -13,20 +13,48 @@ from .core import normalized_difference,validate_weather
 
 STAC='https://earth-search.aws.element84.com/v1/search'
 COLLECTION='sentinel-2-c1-l2a'
+JSON_HOSTS={'earth-search.aws.element84.com','api.open-meteo.com','archive-api.open-meteo.com'}
+
+
+def trusted_json_url(url):
+    parsed=urlparse(url)
+    if (parsed.scheme!='https' or parsed.hostname not in JSON_HOSTS or parsed.username is not None
+            or parsed.password is not None or parsed.port not in (None,443)):
+        raise ValueError('Неподдерживаемый адрес источника данных.')
+
+
+class TrustedRedirect(HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        trusted_json_url(newurl)
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
 
 
 def get_json(url):
+    trusted_json_url(url)
     request=Request(url,headers={'User-Agent':'QGIS-Wildfire-Scenario/0.1.0','Accept':'application/json'})
     try:
-        with urlopen(request,timeout=35) as response:return json.load(response)
-    except Exception as exc:raise ValueError('Не удалось получить данные по сети: '+str(exc)) from exc
+        with build_opener(TrustedRedirect()).open(request,timeout=35) as response:
+            body=response.read(16*1024*1024+1)
+            if len(body)>16*1024*1024:raise ValueError('Ответ источника слишком велик.')
+            return json.loads(body)
+    except Exception as exc:raise ValueError('Не удалось получить данные от разрешённого источника по сети.') from exc
 
 
 def load_weather_csv(path):
     with open(path,encoding='utf-8-sig',newline='') as stream:
-        rows=list(csv.DictReader(stream))
-    if len(rows)>10000:raise ValueError('Метеоряд слишком длинный (>10 тыс. дней).')
-    for row in rows:validate_weather(row)
+        reader=csv.DictReader(stream)
+        fields=('date','temp_c','rh_pct','wind_kmh','wind_from_deg','rain_mm')
+        if not reader.fieldnames or len(set(reader.fieldnames))!=len(reader.fieldnames) or not set(fields)<=set(reader.fieldnames):
+            raise ValueError('CSV должен содержать уникальные поля date, temp_c, rh_pct, wind_kmh, wind_from_deg, rain_mm.')
+        rows=[]
+        for row in reader:
+            if len(rows)>=10000:raise ValueError('Метеоряд слишком длинный (>10 тыс. дней).')
+            if None in row:raise ValueError('В строке CSV больше значений, чем заголовков.')
+            day=validate_weather(row)
+            # Only model inputs cross the export boundary; extra columns may
+            # contain spreadsheet formulas and must never enter the export.
+            rows.append(dict(date=day.isoformat(),**{key:float(row[key]) for key in fields[1:]}))
+    if not rows:raise ValueError('Метеоряд пуст.')
     return rows,dict(kind='user_csv_noon_LST',path=str(path))
 
 
@@ -80,12 +108,14 @@ def write_weather(path,rows):
 
 def warp_asset(asset,terrain,categorical=False):
     url=asset['href'];parsed=urlparse(url)
-    if parsed.scheme!='https' or not parsed.hostname or not parsed.hostname.endswith('.amazonaws.com'):
+    if (parsed.scheme!='https' or parsed.hostname!='e84-earth-search-sentinel-data.s3.us-west-2.amazonaws.com'
+            or parsed.username is not None or parsed.password is not None or parsed.port not in (None,443)
+            or not parsed.path.startswith('/sentinel-2-c1-l2a/') or not parsed.path.endswith('.tif') or parsed.query or parsed.fragment):
         raise ValueError('Спутниковый каталог вернул неподдерживаемый адрес данных.')
     transform=terrain['transform'];height,width=terrain['dem'].shape
     xmin,dx,_,ymax,_,ndy=transform
     with network_options():
-        source=gdal.Open('/vsicurl/'+url)
+        source=gdal.OpenEx('/vsicurl/'+url,allowed_drivers=['GTiff'])
         if source is None:raise ValueError('Спутниковый канал недоступен.')
         output=gdal.Warp('',source,format='MEM',dstSRS=terrain['projection'],
             outputBounds=(xmin,ymax+height*ndy,xmin+width*dx,ymax),width=width,height=height,

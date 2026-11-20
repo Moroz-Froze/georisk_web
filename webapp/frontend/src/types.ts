@@ -8,4 +8,4 @@ export type Result = {status:string;summary:Record<string,number|boolean|null>;s
   data:Record<string,number|string>|null;layers:Layer[];files:{id:string;name:string;title:string;url:string}[];report_url:string;archive_url:string;
   provenance?:{scenario_date:string|null;satellite:{date:string;clear_coverage:number}|null}};
 export type SavedRequest = {parameters:Record<string,number|string>;buffer:number|null;resolution:number;scenario_date:string;satellite:boolean;ignitions:[number,number][];[key:string]:unknown};
-export type Job = {id:string;hazard:Hazard;bbox:Bbox;state:string;progress:number;message:string;created_at:string;result?:Result;request?:SavedRequest};
+export type Job = {id:string;hazard:Hazard;bbox:Bbox;state:string;progress:number;message:string;created_at:string;result?:Result;request?:SavedRequest;error_code?:string;error_details?:Record<string,number>};

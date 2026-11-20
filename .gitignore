@@ -1,54 +1,31 @@
-# FastAPI / Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-/webapp/.deps/
-
-# Tests, type checking and coverage
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-coverage/
-
-# React / Vite
-node_modules/
-/webapp/frontend/dist/
-.vite/
-*.tsbuildinfo
-test-results/
-playwright-report/
-blob-report/
-
-# Package-manager caches
-.npm-cache/
-.pip-cache/
-.pnpm-store/
-
-# Uploaded data, calculation results and generated releases
-/webapp/data/
-/dist/
-/tmp/
-/webapp/preview*.png
-
-# Local environment settings; commit templates, not local values
+# Private deployment settings and user data
 .env
 .env.*
 !.env.example
-!.env.*.example
-!.env.sample
-!.env.template
-
-# Logs, temporary files and OS metadata
+**/data/
+*.pem
+*.key
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+# Local environments and caches
+.venv/
+venv/
+.runtime/
+.deps/
+__pycache__/
+*.py[cod]
 *.log
-*.tmp
-*.temp
-*.swp
-*.swo
-*~
+.pytest_cache/
+node_modules/
+*.tsbuildinfo
+test-results/
+playwright-report/
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
-desktop.ini
+# Release archives are published as GitHub release assets.
+/dist/
+# The verified built interface under webapp/frontend/dist is intentionally tracked.

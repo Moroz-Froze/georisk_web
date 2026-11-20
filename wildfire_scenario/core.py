@@ -5,6 +5,7 @@ enter the FWI equations and are not converted to ignition probabilities.
 """
 from dataclasses import dataclass,asdict
 from datetime import date,timedelta
+from functools import lru_cache
 import heapq
 import math
 import numpy as np
@@ -117,7 +118,19 @@ def behavior_grid(dem,fuel_ids,dx,dy,weather,day,latitude,longitude,parameters=N
     too_steep=safe & (grade>p.max_slope_percent)
     known=safe & (fuels>0) & (fuels<255) & ~too_steep
     fields={key:np.full(dem.shape,np.nan) for key in ('head_m_min','back_m_min','flank_m_min','azimuth_deg','intensity_kw_m')}
-    cache={};rr,cc=np.where(known)
+    # Keep exact physical inputs, but bound retained predictions independently
+    # of raster size. Evicted values are recomputed, never approximated.
+    @lru_cache(maxsize=4096)
+    def prediction(fuel, grade_value, aspect_value):
+        inp=FBPInput(fuel_type=fuel,ffmc=weather['ffmc'],bui=weather['bui'],
+            ws=float(weather['wind_kmh']),wd=float(weather['wind_from_deg']),
+            gs=grade_value,aspect=aspect_value,lat=latitude,lon=longitude,elv=0,
+            dj=date.fromisoformat(day).timetuple().tm_yday,hr=p.duration_min/60,
+            cc=p.grass_curing,gfl=p.grass_load,cbh=p.crown_base,cfl=p.crown_load,
+            fmc=p.foliar_moisture,accel=0)
+        result=fire_behaviour_prediction(inp,'All')
+        return result.ros,result.bros,result.fros,result.raz,result.hfi
+    rr,cc=np.where(known)
     for index,(r,c) in enumerate(zip(rr,cc)):
         if index%256==0:
             if cancelled and cancelled():raise InterruptedError('Расчёт отменён.')
@@ -127,18 +140,8 @@ def behavior_grid(dem,fuel_ids,dx,dy,weather,day,latitude,longitude,parameters=N
         if fuel in ('NF','WA'):
             for array in fields.values():array[r,c]=0
             continue
-        # Memoization only for identical physical inputs; no slope/aspect quantization.
-        key=(fuel,float(grade[r,c]),float(aspect[r,c]))
-        if key not in cache:
-            inp=FBPInput(fuel_type=fuel,ffmc=weather['ffmc'],bui=weather['bui'],
-                ws=float(weather['wind_kmh']),wd=float(weather['wind_from_deg']),
-                gs=key[1],aspect=key[2],lat=latitude,lon=longitude,elv=0,
-                dj=date.fromisoformat(day).timetuple().tm_yday,hr=p.duration_min/60,
-                cc=p.grass_curing,gfl=p.grass_load,cbh=p.crown_base,cfl=p.crown_load,
-                fmc=p.foliar_moisture,accel=0)
-            result=fire_behaviour_prediction(inp,'All')
-            cache[key]=(result.ros,result.bros,result.fros,result.raz,result.hfi)
-        for array,value in zip(fields.values(),cache[key]):
+        values=prediction(fuel,float(grade[r,c]),float(aspect[r,c]))
+        for array,value in zip(fields.values(),values):
             if not math.isfinite(value) or value<0:raise ValueError('Модель FBP вернула некорректный результат.')
             array[r,c]=value
     classes=np.full(dem.shape,255,dtype=np.uint8)

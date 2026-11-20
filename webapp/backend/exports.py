@@ -1,10 +1,12 @@
 import html
+import json
 from pathlib import Path
 import zipfile
 import numpy as np
 from osgeo import gdal
 from PIL import Image
 from .storage import write_json
+from .deployment import public_base_path
 
 PALETTES = {
     'stability_class': [(0, '#9daeb3', 'Ниже минимального уклона'), (1, '#d64045', 'FS < 1'),
@@ -78,7 +80,7 @@ def prepare_result(job_id, folder, hazard, manifest):
     preview_dir = folder/'previews'
     preview_dir.mkdir()
     layers = []
-    base = f'/api/jobs/{job_id}'
+    base = f'{public_base_path()}/api/jobs/{job_id}'
     for key in PREFERRED[hazard]:
         if key not in outputs:
             continue
@@ -97,7 +99,16 @@ def prepare_result(job_id, folder, hazard, manifest):
         relative = path.relative_to(folder/'result').as_posix()
         text = text.replace(html.escape(path.resolve().as_uri()), relative)
         text = text.replace('href="'+path.name+'"', 'href="'+relative+'"')
-    report.write_text(text, encoding='utf-8')
+    scrub = portable_metadata(folder)
+    report.write_text(scrub(text), encoding='utf-8')
+    for filename in outputs.values():
+        if Path(filename).suffix.lower() not in ('.tif', '.tiff'):
+            continue
+        raster = gdal.Open(str(filename), gdal.GA_Update)
+        for key, value in raster.GetMetadata().items():
+            if key.endswith('_TERRAIN_SOURCE'):
+                raster.SetMetadataItem(key, json.dumps(scrub(json.loads(value)), ensure_ascii=False))
+        raster = None
     result = dict(status=manifest['status'], summary=manifest.get('summary', manifest.get('simulation', {})),
                   screening=manifest.get('screening'), railway=manifest.get('railway'), warnings=manifest['warnings'],
                   sources=manifest.get('sources', []), parameters=manifest['parameters'],
@@ -107,9 +118,34 @@ def prepare_result(job_id, folder, hazard, manifest):
                                   weather=manifest.get('data', {}).get('weather_source'),
                                   scenario_date=manifest.get('input', {}).get('scenario_date')),
                   report_url=f'{base}/files/report.html', archive_url=f'{base}/archive')
-    write_json(folder/'result.json', result)
+    write_json(folder/'result.json', scrub(result))
+    # JSON manifests retain provenance and relative output references, without
+    # exposing the hosting account, installation directory or data directory.
+    for path in (folder/'result').rglob('*.json'):
+        data = json.loads(path.read_text(encoding='utf-8'))
+        write_json(path, scrub(data))
     with zipfile.ZipFile(folder/'results.zip', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for path in (folder/'result').rglob('*'):
             if path.is_file():
                 archive.write(path, path.relative_to(folder/'result'))
     return result
+
+
+def portable_metadata(folder):
+    result_root = (folder/'result').resolve()
+    workspace = folder.parents[1].resolve()
+    application = Path(__file__).resolve().parents[2]
+    replacements = []
+    for parent, target in ((result_root, ''), (workspace, '[workspace]/'), (application, '[application]/')):
+        for prefix in (str(parent)+'/', str(parent)+'\\', parent.as_posix()+'/', parent.as_uri()+'/'):
+            replacements.append((prefix, target))
+    def scrub(value):
+        if isinstance(value, dict):
+            return {k:scrub(v) for k,v in value.items()}
+        if isinstance(value, list):
+            return [scrub(v) for v in value]
+        if isinstance(value, str):
+            for prefix, target in replacements:
+                value = value.replace(prefix, target)
+        return value
+    return scrub

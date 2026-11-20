@@ -112,7 +112,7 @@ def _rail_results(rails, crs, pressure, transform, projection, ds, frequency,
     return summary
 
 
-def run_workflow(config, notify=None, cancelled=None):
+def run_workflow(config, notify=None, cancelled=None, simulator=None):
     directory = Path(config['directory'])
     directory.mkdir(parents=True, exist_ok=True)
     if (directory/'manifest.json').exists():
@@ -172,11 +172,15 @@ def run_workflow(config, notify=None, cancelled=None):
     if screening['acceptable']:
         if notify:
             notify(28, 'Моделирование сценарной зоны воздействия…')
-        result = simulate(terrain['dem'], release, dx, dy, p,
+        result = (simulator or simulate)(terrain['dem'], release, dx, dy, p,
                           lambda pct: notify(28+.55*pct, 'Моделирование сценарной зоны воздействия…') if notify else None,
                           cancelled)
         manifest['status'] = 'completed'
         manifest['simulation'] = result['summary']
+        if result['summary'].get('batches', 1) > 1:
+            warnings.append(f"Все {result['summary']['particles']} ячеек очагов обработаны в {result['summary']['batches']} группах. "
+                            'Шаг рельефа сохранён; объединены максимумы скорости и давления и минимальные времена прихода. '
+                            'Точки экспортируемых линий траекторий прорежены для ограничения размера файлов.')
         if result['summary']['truncated']:
             warnings.append('Трассеры достигли границы или NoData: зона воздействия обрезана. Расширьте буфер; полный годовой риск не рассчитан.')
         if result['summary']['time_limit']:
@@ -188,6 +192,9 @@ def run_workflow(config, notify=None, cancelled=None):
             manifest['outputs'][name] = str(path)
         vector_path = directory/'scenario.gpkg'
         ds = ogr.GetDriverByName('GPKG').CreateDataSource(str(vector_path))
+        ds.StartTransaction()
+        if notify:
+            notify(83, 'Сохранение зон воздействия и траекторий…')
         _polygonize(release.astype(np.uint8), transform, projection, ds, 'release_candidates')
         _polygonize(result['intensity'], transform, projection, ds, 'intensity_zones')
         tracks = ds.CreateLayer('trajectories', spatial_ref(projection), ogr.wkbLineString)
@@ -196,6 +203,12 @@ def run_workflow(config, notify=None, cancelled=None):
             _field(tracks, key, kind)
         statuses = ['time_limit', 'stopped', 'boundary', 'nodata']
         for i, path in enumerate(result['paths']):
+            if i % 512 == 0:
+                if cancelled and cancelled():
+                    raise InterruptedError('Расчёт отменён.')
+                if notify:
+                    end = 87 if config.get('rails') else 96
+                    notify(84+(end-84)*i/max(1, len(result['paths'])), 'Сохранение траекторий…')
             if len(path) < 2:
                 continue
             line = ogr.Geometry(ogr.wkbLineString)
@@ -218,6 +231,7 @@ def run_workflow(config, notify=None, cancelled=None):
             warnings.append('Трасса ЖД не указана: воздействие на железную дорогу и денежный риск не рассчитаны.')
         if frequency is None:
             warnings.append('Частота сценария не задана: ожидаемый годовой денежный ущерб не рассчитан.')
+        ds.CommitTransaction()
         ds = None
         manifest['outputs']['vectors'] = str(vector_path)
     else:

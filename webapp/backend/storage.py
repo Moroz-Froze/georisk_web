@@ -21,7 +21,14 @@ def write_json(path, value):
 
 
 def read_json(path):
-    return json.loads(Path(path).read_text(encoding='utf-8'))
+    path = Path(path)
+    for attempt in range(20):
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(.01*(attempt+1))
 
 
 def identifier(value):

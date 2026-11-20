@@ -6,13 +6,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .catalog import validated_parameters
 
 
-class JobRequest(BaseModel):
+class AreaRequest(BaseModel):
     model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
     hazard: Literal['avalanche', 'landslide', 'wildfire']
     bbox: tuple[float, float, float, float]
-    parameters: dict[str, float | int | str] = Field(default_factory=dict)
     buffer: float | None = Field(default=None, ge=0, le=20000)
     resolution: float = Field(default=30, ge=1, le=1000)
+
+    @model_validator(mode='after')
+    def validate_bounds(self):
+        west, south, east, north = self.bbox
+        if not (-180 <= west < east <= 180 and -80 <= south < north <= 80 and east-west <= 6):
+            raise ValueError('Проверьте границы участка: запад < восток, юг < север; широты от −80 до 80°, ширина не более 6°.')
+        return self
+
+
+class JobRequest(AreaRequest):
+    parameters: dict[str, float | int | str] = Field(default_factory=dict)
     dem_id: UUID | None = None
     rail_id: UUID | None = None
     soil_id: UUID | None = None
@@ -36,8 +46,6 @@ class JobRequest(BaseModel):
     @model_validator(mode='after')
     def validate_scenario(self):
         west, south, east, north = self.bbox
-        if not (-180 <= west < east <= 180 and -80 <= south < north <= 80 and east-west <= 6):
-            raise ValueError('Проверьте границы участка: запад < восток, юг < север; широты от −80 до 80°.')
         if self.release_min_slope >= self.release_max_slope:
             raise ValueError('Нижний уклон очага должен быть меньше верхнего.')
         for lon, lat in self.ignitions:

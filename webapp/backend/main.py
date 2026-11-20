@@ -1,32 +1,51 @@
 from contextlib import asynccontextmanager
-import json
 import os
 from pathlib import Path
 import shutil
 from uuid import uuid4
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.encoders import jsonable_encoder
+from fastapi import FastAPI, HTTPException, Request, Response
+from starlette.datastructures import UploadFile
+from starlette.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from osgeo import gdal
 from .catalog import catalog
-from .inputs import config_for
-from .jobs import JobManager
-from .schemas import JobRequest
+from .inputs import validate_assets
+from uuid import UUID
+from pydantic import BaseModel, ConfigDict, Field
+from .sessions import COOKIE, SessionMiddleware, SessionStore, check_csrf
+from .schemas import AreaRequest, JobRequest
+from .area_limits import check_area
 from .storage import write_json
+from .identity import APPLICATION, data_directory, instance_id
+from .security import SecurityMiddleware
+from .deployment import public_base_path
+from .upload_validation import validate_upload
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class TabRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    tab_id: UUID
+    csrf: str | None = Field(default=None, max_length=128)
+
+
 def create_app(data_root=None):
-    root = Path(data_root or os.environ.get('HAZARD_DATA_DIR', ROOT/'webapp'/'data')).resolve()
+    root = Path(data_root).resolve() if data_root is not None else data_directory()
     @asynccontextmanager
     async def lifespan(app):
-        app.state.jobs = JobManager(root)
-        yield
-        app.state.jobs.close()
-    app = FastAPI(title='ГеоРиск · моделирование природных опасностей', version='1.0.0', lifespan=lifespan)
+        app.state.sessions = SessionStore(root)
+        try:
+            yield
+        finally:
+            app.state.sessions.close()
+    cookie_path = public_base_path()+'/'
+    docs = os.environ.get('GEORISK_DOCS') == '1'
+    app = FastAPI(title='ГеоРиск · моделирование природных опасностей', version='1.5.0', lifespan=lifespan,
+                  docs_url='/docs' if docs else None, redoc_url=None, openapi_url='/openapi.json' if docs else None)
+    app.add_middleware(SessionMiddleware)
+    app.add_middleware(SecurityMiddleware)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_, exc):
@@ -39,86 +58,145 @@ def create_app(data_root=None):
 
     @app.exception_handler(ValueError)
     async def invalid(_, exc):
-        return JSONResponse(status_code=422, content={'detail': str(exc)})
+        return JSONResponse(status_code=422, content={'detail': str(exc)[:1000]})
+
+    def current_session(request):
+        return app.state.sessions.lookup(request.cookies.get(COOKIE))
+
+    @app.post('/api/session')
+    def begin_session(payload: TabRequest, request: Request, response: Response):
+        session = app.state.sessions.begin(request.cookies.get(COOKIE), payload.tab_id,
+                                          request.client.host if request.client else 'unknown')
+        response.set_cookie(COOKIE, session.token, httponly=True, samesite='strict',
+                            secure=(request.url.scheme == 'https' or os.environ.get('GEORISK_COOKIE_SECURE') == '1'
+                                    or os.environ.get('GEORISK_PUBLIC_ORIGIN', '').startswith('https://')), path=cookie_path)
+        return dict(workspace_id=session.workspace_id, csrf=session.csrf,
+                    idle_seconds=app.state.sessions.idle_seconds,
+                    grace_seconds=app.state.sessions.grace_seconds)
+
+    @app.post('/api/session/heartbeat')
+    def heartbeat(payload: TabRequest, request: Request):
+        session = current_session(request)
+        check_csrf(session, request.headers.get('x-georisk-csrf') or payload.csrf)
+        app.state.sessions.heartbeat(session.token, payload.tab_id)
+        return {'active': True}
+
+    @app.post('/api/session/leave')
+    def leave(payload: TabRequest, request: Request):
+        session = current_session(request)
+        check_csrf(session, request.headers.get('x-georisk-csrf') or payload.csrf)
+        app.state.sessions.leave(session.token, payload.tab_id)
+        return {'closing': True}
+
+    @app.post('/api/session/end')
+    def end_session(request: Request, response: Response):
+        token = request.cookies.get(COOKIE)
+        try:
+            session = current_session(request)
+        except HTTPException as error:
+            if error.status_code != 401:
+                raise
+        else:
+            check_csrf(session, request.headers.get('x-georisk-csrf'))
+        deleted = app.state.sessions.end(token)
+        response.delete_cookie(COOKIE, path=cookie_path)
+        return {'deleted': deleted}
 
     @app.get('/api/health')
     def health():
-        return {'status': 'ok', 'gdal': gdal.VersionInfo('--version')}
+        return {'status': 'ok', 'application': APPLICATION, 'instance': instance_id(root)}
 
     @app.get('/api/catalog')
     def get_catalog():
         return catalog()
 
     @app.post('/api/uploads', status_code=201)
-    async def upload(file: UploadFile = File(...)):
-        suffix = Path(file.filename or '').suffix.lower()
-        if suffix not in ('.tif', '.tiff', '.geojson', '.csv'):
-            raise ValueError('Поддерживаются GeoTIFF, GeoJSON и CSV.')
-        asset_id = str(uuid4())
-        directory = root/'uploads'/asset_id
-        directory.mkdir(parents=True)
-        path = directory/('data'+suffix)
+    async def upload(request: Request):
+        if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'multipart/form-data':
+            raise HTTPException(415, 'Загрузка требует multipart/form-data.')
+        user = request.state.user
+        store = app.state.sessions
+        store.begin_upload(user)
+        directory = None
         size = 0
+        success = False
         try:
-            with path.open('wb') as stream:
-                while chunk := await file.read(1024*1024):
-                    size += len(chunk)
-                    if size > (200 if suffix in ('.tif', '.tiff') else 10)*1024*1024:
-                        raise ValueError('Слишком большой файл: до 200 МБ для GeoTIFF, до 10 МБ для GeoJSON/CSV.')
-                    stream.write(chunk)
-            if not size:
-                raise ValueError('Файл пуст.')
-            if suffix in ('.tif', '.tiff'):
-                try:
-                    ds = gdal.OpenEx(str(path), allowed_drivers=['GTiff'])
-                    if ds is None or ds.RasterCount != 1 or not ds.GetProjection():
-                        raise ValueError('Нужен одноканальный GeoTIFF высот с системой координат.')
-                    ds = None
-                except RuntimeError as exc:
-                    raise ValueError('Не удалось прочитать GeoTIFF.') from exc
-            elif suffix == '.geojson':
-                try:
-                    payload = json.loads(path.read_text(encoding='utf-8-sig'))
-                except (ValueError, UnicodeError) as exc:
-                    raise ValueError('Не удалось прочитать GeoJSON UTF-8.') from exc
-                if not isinstance(payload, dict) or payload.get('type') not in ('Feature', 'FeatureCollection'):
-                    raise ValueError('Нужен GeoJSON Feature или FeatureCollection в WGS 84.')
-            meta = dict(id=asset_id, name=Path(file.filename).name, suffix=suffix, size=size)
-            write_json(directory/'asset.json', meta)
-            return meta
-        except Exception:
-            shutil.rmtree(directory)
+            async with request.form(max_files=1, max_fields=0, max_part_size=1024) as form:
+                file = form.get('file')
+                if len(form) != 1 or not isinstance(file, UploadFile):
+                    raise HTTPException(400, 'Передайте один файл в поле file.')
+                suffix = Path(file.filename or '').suffix.lower()
+                if suffix not in ('.tif', '.tiff', '.geojson', '.csv'):
+                    raise ValueError('Поддерживаются GeoTIFF, GeoJSON и CSV.')
+                asset_id = str(uuid4())
+                directory = user.root/'uploads'/asset_id
+                directory.mkdir(parents=True)
+                path = directory/('data'+suffix)
+                with path.open('wb') as stream:
+                    while chunk := await file.read(1024*1024):
+                        if user.closing:
+                            raise ValueError('Сессия завершена.')
+                        if size+len(chunk) > (200 if suffix in ('.tif', '.tiff') else 10)*1024*1024:
+                            raise HTTPException(413, 'До 200 МиБ для GeoTIFF, до 10 МиБ для GeoJSON/CSV.')
+                        store.add_upload_bytes(user, len(chunk))
+                        size += len(chunk)
+                        await run_in_threadpool(stream.write, chunk)
+                if not size:
+                    raise ValueError('Файл пуст.')
+                await validate_upload(path)
+                meta = dict(id=asset_id, name=Path(file.filename or '').name[:255], suffix=suffix, size=size)
+                write_json(directory/'asset.json', meta)
+                success = True
+                return meta
+        except BaseException:
+            if directory is not None:
+                shutil.rmtree(directory)
             raise
         finally:
-            await file.close()
+            store.finish_upload(user, size, success)
+
+    @app.post('/api/area-check')
+    def area_check(request: AreaRequest):
+        return check_area(request)
 
     @app.post('/api/jobs', status_code=202)
-    def submit(request: JobRequest):
+    def submit(request: JobRequest, http: Request):
+        user = http.state.user
+        assessment = check_area(request)
+        if not assessment['valid']:
+            raise ValueError(assessment['message'])
         payload = request.model_dump(mode='json')
         # Validate asset ownership/format and geometry before occupying the queue.
-        config_for(payload, root, root/'unused')
-        return app.state.jobs.submit(payload)
+        validate_assets(payload, user.root)
+        return user.jobs.submit(payload)
 
     @app.get('/api/jobs')
-    def list_jobs():
-        return app.state.jobs.list()
+    def list_jobs(request: Request):
+        return request.state.user.jobs.list()
 
     @app.get('/api/jobs/{job_id}')
-    def get_job(job_id: str):
-        return app.state.jobs.read(job_id)
+    def get_job(job_id: str, request: Request):
+        return request.state.user.jobs.read(job_id)
+
+    @app.delete('/api/jobs/{job_id}')
+    def delete_job(job_id: str, request: Request):
+        try:
+            return request.state.user.jobs.delete(job_id)
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post('/api/jobs/{job_id}/cancel', status_code=202)
-    def cancel(job_id: str):
-        return app.state.jobs.cancel(job_id)
+    def cancel(job_id: str, request: Request):
+        return request.state.user.jobs.cancel(job_id)
 
-    def completed_folder(job_id):
-        if app.state.jobs.read(job_id, False)['state'] != 'completed':
+    def completed_folder(job_id, user):
+        if user.jobs.read(job_id, False)['state'] != 'completed':
             raise HTTPException(409, 'Результат ещё не готов.')
-        return app.state.jobs.folder(job_id)
+        return user.jobs.folder(job_id)
 
     @app.get('/api/jobs/{job_id}/previews/{filename}')
-    def image(job_id: str, filename: str):
-        folder = completed_folder(job_id)
+    def image(job_id: str, filename: str, request: Request):
+        folder = completed_folder(job_id, request.state.user)
         if Path(filename).name != filename or not filename.endswith('.png'):
             raise FileNotFoundError()
         path = folder/'previews'/filename
@@ -127,8 +205,8 @@ def create_app(data_root=None):
         return FileResponse(path, media_type='image/png')
 
     @app.get('/api/jobs/{job_id}/files/{filename:path}')
-    def file(job_id: str, filename: str):
-        folder = (completed_folder(job_id)/'result').resolve()
+    def file(job_id: str, filename: str, request: Request):
+        folder = (completed_folder(job_id, request.state.user)/'result').resolve()
         path = (folder/filename).resolve()
         if not path.is_relative_to(folder) or not path.is_file():
             raise FileNotFoundError()
@@ -138,8 +216,8 @@ def create_app(data_root=None):
         return response
 
     @app.get('/api/jobs/{job_id}/archive')
-    def archive(job_id: str):
-        return FileResponse(completed_folder(job_id)/'results.zip', filename=f'georisk-{job_id[:8]}.zip')
+    def archive(job_id: str, request: Request):
+        return FileResponse(completed_folder(job_id, request.state.user)/'results.zip', filename=f'georisk-{job_id[:8]}.zip')
 
     frontend = ROOT/'webapp'/'frontend'/'dist'
     if frontend.exists():

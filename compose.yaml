@@ -3,11 +3,42 @@ services:
     build:
       context: .
       dockerfile: webapp/Dockerfile
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Shared CPU quota for the web server and all calculation subprocesses.
+    cpus: "${GEORISK_CPUS:-0.5}"
+    mem_limit: "${GEORISK_MEMORY_LIMIT:-2g}"
+    memswap_limit: "${GEORISK_MEMORY_LIMIT:-2g}"
+    environment:
+      GEORISK_COOKIE_SECURE: "${GEORISK_COOKIE_SECURE:-0}"
+      GEORISK_ALLOWED_HOSTS: "${GEORISK_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
+      GEORISK_PUBLIC_ORIGIN: "${GEORISK_PUBLIC_ORIGIN:-}"
+      GEORISK_BASE_PATH: "${GEORISK_BASE_PATH:-}"
+      GEORISK_TRUSTED_PROXIES: "${GEORISK_TRUSTED_PROXIES:-127.0.0.1}"
+      PYTHONDONTWRITEBYTECODE: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+      BLIS_NUM_THREADS: "1"
+      GDAL_NUM_THREADS: "1"
+      GDAL_CACHEMAX: "${GEORISK_GDAL_CACHE_MB:-64}"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${GEORISK_PORT:-8000}:8000"
     volumes:
       - georisk-data:/data
     restart: unless-stopped
-    stop_grace_period: 15s
+    stop_grace_period: 45s
 volumes:
   georisk-data:
